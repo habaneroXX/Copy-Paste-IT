@@ -1,0 +1,413 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  EnvironmentName:
+    Description: Min environment
+    Default: patmans
+    Type: String
+    AllowedPattern: '[a-z0-9]*$'
+    ConstraintDescription: no big letters.
+    
+  VPC:
+    Default: vpc-3cccf65a
+    Description: Select VPC
+    Type: 'AWS::EC2::VPC::Id'
+    
+  Subnet1:
+    Default: subnet-1e5a2d78
+    Description: Select Subnet
+    AllowedValues:
+      - subnet-1e5a2d78
+    Type: String
+    
+  Subnet2:
+    Default: subnet-b40244fc
+    Description: Select Subnet
+    AllowedValues:
+      - subnet-b40244fc
+    Type: String
+    
+  Subnet3:
+    Default: subnet-d957e683
+    Description: Select Subnet
+    AllowedValues:
+      - subnet-d957e683
+    Type: String
+    
+  KeyName:
+    Description: Select SSH Key
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Default: MyLoginKeyPair
+Resources:
+
+  DB:
+    Type: 'AWS::RDS::DBInstance'
+    DeletionPolicy: Delete
+    Properties:
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: false
+      AllocatedStorage: 20
+      BackupRetentionPeriod: 7
+      Iops: 0
+      MonitoringInterval: 0
+      Port: 3306
+      DBInstanceClass: db.t2.micro
+      DBName: !Sub '${EnvironmentName}wordpressdb'
+      DBInstanceIdentifier: !Sub '${EnvironmentName}-wordpressdb'
+      DBParameterGroupName: default.mariadb10.2
+      DBSubnetGroupName: default
+      Engine: mariadb
+      EngineVersion: 10.2.21
+      LicenseModel: general-public-license
+      MasterUserPassword: wordpresspassword
+      MasterUsername: wordpressuser
+      OptionGroupName: 'default:mariadb-10-2'
+      StorageType: GP2
+      VPCSecurityGroups:
+        - Ref: SecurityGroupDataBase
+        
+  EFSFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    DependsOn:
+      - DB
+    Properties:
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-EFSFileSystem'
+      PerformanceMode: generalPurpose
+      Encrypted: false
+      ThroughputMode: bursting
+      
+  MountTarget1:
+    Type: 'AWS::EFS::MountTarget'
+    DependsOn:
+      - EFSFileSystem
+      - SecurityGroupDataBase
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref Subnet1
+      SecurityGroups:
+      - !Ref SecurityGroupPort80
+      - !Ref SecurityGroupPort22
+      
+  MountTarget2:
+    Type: 'AWS::EFS::MountTarget'
+    DependsOn:
+      - EFSFileSystem
+      - SecurityGroupDataBase
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref Subnet2
+      SecurityGroups:
+      - !Ref SecurityGroupPort80
+      - !Ref SecurityGroupPort22
+      
+  MountTarget3:
+    Type: 'AWS::EFS::MountTarget'
+    DependsOn:
+      - EFSFileSystem
+      - SecurityGroupDataBase
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref Subnet3
+      SecurityGroups:
+      - !Ref SecurityGroupPort80
+      - !Ref SecurityGroupPort22
+      
+  AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+      - DB
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvironmentName}-AutoLaunchWordpressInstance'
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      LaunchConfigurationName: !Ref LaunchConfig
+      DesiredCapacity: 1
+      MinSize: 1
+      MaxSize: 1
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-AutoLaunchWordpressInstance'
+          PropagateAtLaunch: 'true'
+      VPCZoneIdentifier:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+        
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+          
+  LoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    DependsOn:
+      - DB
+    Properties:
+      Name: !Sub '${EnvironmentName}-LoadBalancer'
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Type: application
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+      SecurityGroups:
+        - !Ref SecurityGroupPort80
+        
+  SecurityGroupPort80:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: SecurityGroupPort80
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}SecurityGroupPort80'
+          
+  SecurityGroupPort22:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: SecurityGroupPort22
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 172.16.0.0/12
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 172.16.0.0/12
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}SecurityGroupPort22'
+          
+  WordpressInstance:
+    Type: 'AWS::EC2::Instance'
+    DependsOn:
+     - DB
+     - MountTarget1
+     - MountTarget2
+     - MountTarget3
+     - EFSFileSystem
+     - LoadBalancer
+    Properties:
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref SecurityGroupPort22
+        - !Ref SecurityGroupPort80
+        - !Ref SecurityGroupDataBase
+      InstanceType: t2.micro
+      ImageId: ami-030dbca661d402413
+      SubnetId: !Ref Subnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-WordpressInstance'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Mount EFS
+          yum update -y
+          yum install amazon-efs-utils -y
+          mkdir -p /var/www/html/wp-content
+          DIR_SRC=${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com
+          echo -e "$DIR_SRC:/ /var/www/html/wp-content nfs defaults 0 0" | tee -a /etc/fstab
+          mount -a
+          rm -rf tee
+          # INSTALL WP - EDIT DBNAME
+          yum install -y httpd php-mysqlnd
+          amazon-linux-extras install -y php7.2
+          systemctl start httpd
+          systemctl enable httpd
+          usermod -a -G apache ec2-user
+          chown -R ec2-user:apache /var/www
+          chmod 2775 /var/www && find /var/www -type d -exec sudo chmod 2775 {} \;
+          find /var/www -type f -exec sudo chmod 0664 {} \;
+          yum install php-mbstring -y
+          systemctl restart httpd
+          systemctl restart php-fpm
+          wget https://wordpress.org/latest.tar.gz
+          tar -xzf latest.tar.gz
+          rm -rf latest.tar.gz
+          cp wordpress/wp-config-sample.php wordpress/wp-config.php
+          sed -i "s/define( 'DB_NAME', 'database_name_here' );/define( 'DB_NAME', '${EnvironmentName}wordpressdb' );/g " wordpress/wp-config.php
+          sed -i "s/define( 'DB_USER', 'username_here' );/define( 'DB_USER', 'wordpressuser' );/g " wordpress/wp-config.php
+          sed -i "s/define( 'DB_PASSWORD', 'password_here' );/define( 'DB_PASSWORD', 'wordpresspassword' );/g " wordpress/wp-config.php
+          sed -i "s/localhost/${DB.Endpoint.Address}/g" wordpress/wp-config.php
+          curl https://api.wordpress.org/secret-key/1.1/salt/ > salt.txt
+          sed -i '49,56d' wordpress/wp-config.php
+          sed -i '51r salt.txt' wordpress/wp-config.php 
+          rm -rf salt.txt
+          rm -rf tee
+          cp -r wordpress/* /var/www/html/
+          rm -rf wordpress
+          sed -i '151s/AllowOverride None/AllowOverride All/' /etc/httpd/conf/httpd.conf
+          chown -R apache /var/www
+          chgrp -R apache /var/www
+          chmod 2775 /var/www
+          find /var/www -type d -exec sudo chmod 2775 {} \;
+          find /var/www -type f -exec sudo chmod 0664 {} \;
+          systemctl restart httpd
+          systemctl enable php-fpm
+          curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          mv wp-cli.phar /usr/local/bin/wp
+          cd /var/www/html
+          EC2HOSTNAME=`curl http://169.254.169.254/latest/meta-data/public-hostname`
+          wp core install --url=$EC2HOSTNAME --title=Welcome CloudBroker! --admin_user=wordpressuser --admin_password=wordpresspassword --admin_email=PatrikLindbladPatrik@outlook.se
+          wp theme activate twentyseventeen
+          
+  SecurityGroupDataBase:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: SecurityGroupDataBase
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}SecurityGroupDataBase'
+          
+  TargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: '200'
+      Name: !Sub '${EnvironmentName}-TargetGroup'
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+      Targets:
+        - Id: !Ref WordpressInstance
+        
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    DependsOn:
+      - WordpressInstance
+    Properties:
+      ImageId: ami-030dbca661d402413
+      AssociatePublicIpAddress: true
+      InstanceType: t2.micro
+      SecurityGroups:
+        - !Ref SecurityGroupPort22
+        - !Ref SecurityGroupPort80
+        - !Ref SecurityGroupDataBase
+      KeyName: !Ref KeyName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Mount EFS
+          yum update -y
+          yum install amazon-efs-utils -y
+          mkdir -p /var/www/html/wp-content
+          DIR_SRC=${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com
+          echo -e "$DIR_SRC:/ /var/www/html/wp-content nfs defaults 0 0" | tee -a /etc/fstab
+          mount -a
+          rm -rf tee
+          # INSTALL WP - EDIT DBNAME
+          yum install -y httpd php-mysqlnd
+          amazon-linux-extras install -y php7.2
+          systemctl start httpd
+          systemctl enable httpd
+          usermod -a -G apache ec2-user
+          chown -R ec2-user:apache /var/www
+          chmod 2775 /var/www && find /var/www -type d -exec sudo chmod 2775 {} \;
+          find /var/www -type f -exec sudo chmod 0664 {} \;
+          yum install php-mbstring -y
+          systemctl restart httpd
+          systemctl restart php-fpm
+          wget https://wordpress.org/latest.tar.gz
+          tar -xzf latest.tar.gz
+          rm -rf latest.tar.gz
+          cp wordpress/wp-config-sample.php wordpress/wp-config.php
+          sed -i "s/define( 'DB_NAME', 'database_name_here' );/define( 'DB_NAME', '${EnvironmentName}wordpressdb' );/g " wordpress/wp-config.php
+          sed -i "s/define( 'DB_USER', 'username_here' );/define( 'DB_USER', 'wordpressuser' );/g " wordpress/wp-config.php
+          sed -i "s/define( 'DB_PASSWORD', 'password_here' );/define( 'DB_PASSWORD', 'wordpresspassword' );/g " wordpress/wp-config.php
+          sed -i "s/localhost/${DB.Endpoint.Address}/g" wordpress/wp-config.php
+          curl https://api.wordpress.org/secret-key/1.1/salt/ > salt.txt
+          sed -i '49,56d' wordpress/wp-config.php
+          sed -i '51r salt.txt' wordpress/wp-config.php 
+          rm -rf salt.txt
+          rm -rf tee
+          cp -r wordpress/* /var/www/html/
+          rm -rf wordpress
+          sed -i '151s/AllowOverride None/AllowOverride All/' /etc/httpd/conf/httpd.conf
+          chown -R apache /var/www
+          chgrp -R apache /var/www
+          chmod 2775 /var/www
+          find /var/www -type d -exec sudo chmod 2775 {} \;
+          find /var/www -type f -exec sudo chmod 0664 {} \;
+          systemctl restart httpd
+          systemctl enable php-fpm
+          curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          mv wp-cli.phar /usr/local/bin/wp
+          cd /var/www/html
+          EC2HOSTNAME=`curl http://169.254.169.254/latest/meta-data/public-hostname`
+          wp core install --url=$EC2HOSTNAME --title=Welcome CloudBroker! --admin_user=wordpressuser --admin_password=wordpresspassword --admin_email=PatrikLindbladPatrik@outlook
+          wp theme activate twentyseventeen
+        
+  BastionHost:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      KeyName: !Ref KeyName
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash
+
+          yum update -y
+
+      SecurityGroupIds:
+        - !Ref SecurityGroupPort22
+      InstanceType: t2.micro
+      ImageId: ami-bff32ccc
+      SubnetId: !Ref Subnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-BastionHost'
+          
+  SecurityGroupBastionHost:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: SSH From Bastion
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}SecurityGroupBastionHost'
+
+Outputs:
+  RDSDB:
+    Value: !GetAtt DB.Endpoint.Address
+  LBDNS:
+    Value: !GetAtt LoadBalancer.DNSName
+  InstanceId:
+    Description: BastionHost ID
+    Value:
+      Ref: BastionHost
+  PublicIP1:
+    Description: Public IP Bastion Host
+    Value: !GetAtt BastionHost.PublicIp
